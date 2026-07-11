@@ -1404,6 +1404,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         # debug
         def add_debug_arguments(parser):
             parser.add_argument(
+                "--disable-rollout-trajectory-dump",
+                action="store_true",
+                default=False,
+                help=(
+                    "Disable the default per-rollout trajectory persistence. By default every "
+                    "training rollout's full trajectories (prompt, response, raw reward, task "
+                    "metadata, group/sample indices, status) are written to "
+                    "`<save>/trajectories/rollout_<id>.jsonl.gz` on the shared filesystem."
+                ),
+            )
+            parser.add_argument(
                 "--save-debug-rollout-data",
                 type=str,
                 default=None,

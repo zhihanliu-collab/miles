@@ -1,4 +1,7 @@
+import gzip
+import json
 import logging
+import os
 from typing import Any
 
 import numpy as np
@@ -17,6 +20,60 @@ from miles.utils.types import Sample
 
 
 logger = logging.getLogger(__name__)
+
+
+def _json_safe(obj):
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def dump_rollout_trajectories(rollout_id, args, samples: list[Sample], rollout_time):
+    """Persist every training rollout's full trajectories + metadata to the
+    shared filesystem, one gzip JSONL per rollout:
+    ``<save>/trajectories/rollout_<id>.jsonl.gz``.
+
+    On by default whenever ``--save`` is set; disable with
+    ``--disable-rollout-trajectory-dump``. Each record carries the task
+    identity (sample metadata + label), the raw reward as assigned at rollout
+    time, the sample's group index and index within its group, generation
+    status/length/weight versions, and the full prompt + response text.
+    A dump failure is logged and never interrupts training.
+    """
+    save_dir = getattr(args, "save", None)
+    if not save_dir or getattr(args, "disable_rollout_trajectory_dump", False):
+        return
+    try:
+        out_dir = os.path.join(save_dir, "trajectories")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"rollout_{rollout_id:06d}.jsonl.gz")
+        tmp = path + ".tmp"
+        n_per_prompt = max(1, getattr(args, "n_samples_per_prompt", 1) or 1)
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            for i, s in enumerate(samples):
+                status = getattr(s, "status", None)
+                rec = {
+                    "rollout_id": rollout_id,
+                    "sample_index": i,
+                    "group_index": s.group_index if s.group_index is not None else i // n_per_prompt,
+                    "index_in_group": s.index if s.index is not None else i % n_per_prompt,
+                    "label": s.label,
+                    "reward": _json_safe(s.reward),
+                    "status": status.value if hasattr(status, "value") else str(status),
+                    "response_length": s.response_length,
+                    "weight_versions": s.weight_versions,
+                    "rollout_time": rollout_time,
+                    "metadata": {k: _json_safe(v) for k, v in (s.metadata or {}).items()},
+                    "prompt": _json_safe(s.prompt),
+                    "response": s.response,
+                }
+                f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        os.replace(tmp, path)
+        logger.info(f"trajectory dump: {len(samples)} samples -> {path}")
+    except Exception:
+        logger.exception("trajectory dump failed (training continues unaffected)")
 
 
 def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] | None = None):
@@ -53,6 +110,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
 
 
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+    dump_rollout_trajectories(rollout_id, args, samples, rollout_time)
     if (x := args.custom_rollout_log_function_path) is not None:
         custom_log_func = load_function(x)
         if custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
